@@ -2,22 +2,24 @@
 # -*- coding: utf8 -*-
 
 
-import tensorflow as tf
 import os
-import numpy as np
 import re
+import random
 import sys
 import tarfile
 import gzip
 import zipfile
+import numpy as np
+import tensorflow as tf
+import scipy.misc
 from . import visualize
+from . import prepro
 from . import nlp
 import pickle
 from six.moves import urllib
 from six.moves import cPickle
 from six.moves import zip
 from tensorflow.python.platform import gfile
-
 
 ## Load dataset functions
 def load_mnist_dataset(shape=(-1,784), path="data/mnist/"):
@@ -626,7 +628,121 @@ def load_flickr1M_dataset(tag='sky', size=10, path="data/flickr1M", n_threads=50
     images = visualize.read_images(select_images_list, '', n_threads=n_threads, printable=printable)
     return images
 
+def load_MITsceneparsing_dataset(path="data/MITSceneParsingChallange/",
+    load_size=100, img_size=(224, 224), randomize=False):
+    """MIT Scene Parsing Benchmark (SceneParse150) provides a standard training
+    and evaluation platform for the algorithms of scene parsing. The data for
+    this benchmark comes from ADE20K Dataset which contains more than 20K
+    scene-centric images exhaustively annotated with objects and object parts.
+    Specifically, the benchmark is divided into 20K images for training, 2K
+    images for validation/testing.
+    There are totally 150 semantic categories included for evaluation, which
+    include stuffs like sky, road, grass, and discrete objects like person,
+    car, bed. Note that there are non-uniform distribution of objects occuring
+    in the images, mimicking a more natural object occurrence in daily scene.
+    For each image, segmentation algorithms will produce a semantic segmentation
+    mask, predicting the semantic category for each pixel in the image.
 
+    Parameters
+    ------------
+    path : string
+        path data is downloaded to, default 'data/MITSceneParsingChallange/'
+    load_size : float
+        Percent of the total images to load into memory, defaults to 100
+    img_size : tuple of 2 ints
+        Reshapes images to the specified size, defaults to (224, 224)
+    randomize: boolean
+        If true selects images at random
+
+    Returns
+    -------
+    Tuple of:
+    x_train : numpy array of shape [num_images, img_size[0], img_size[1], 3]
+    y_train : numpy array of shape [num_images, img_size[0], img_size[1], 1]
+    x_val : numpy array of shape [num_images, img_size[0], img_size[1], 3]
+    y_val : numpy array of shape [num_images, img_size[0], img_size[1], 1]
+
+    Examples
+    ----------
+    - Load all images
+    >>> t_imgs, a_t_imgs, val_imgs, a_val_imgs = tl.files.load_MITsceneparsing_dataset()
+    - Load 10 percent of the images
+    >>> t_imgs, a_t_imgs, val_imgs, a_val_imgs = tl.files.load_MITsceneparsing_dataset(load_size=10)
+    """
+    n_threads=10
+
+    def _read_and_process_image(image, im_size, path=''):
+        img = scipy.misc.imread(os.path.join(path, image))
+        # make sure input images are of shape(h,w,3) and annotations of shape (h,w,1)
+        if im_size[2] == 3 and len(img.shape) < 3:
+            img = np.asarray([img for i in range(3)])
+            img = np.swapaxes(img, 0, 2)
+
+        if im_size[2] == 1 and len(img.shape) < 3:
+            img = np.expand_dims(img, axis=3)
+
+        img = prepro.imresize(img, size=[im_size[0], im_size[1]], interp='bilinear')
+        return img
+
+    def _read_and_process_images(images_list, im_size, path=''):
+        np_array = np.zeros((len(images_list), im_size[0], im_size[1], im_size[2]))
+        for i, idx in enumerate(range(0, len(images_list), n_threads)):
+            b_imgs_list = images_list[idx : idx + n_threads]
+            b_imgs = prepro.threading_data(b_imgs_list, fn=_read_and_process_image,
+                im_size=im_size, path=path)
+            #print b_imgs.shape
+            np_array[i*n_threads:i*n_threads+n_threads,:] = np.asarray(b_imgs)
+        return np_array
+
+    print("Loading the MIT Scene Parsing Benchmark with {}% of the images, resizing all images to {} and {}").format(load_size, img_size[0], img_size[1])
+
+    #Maybe dowload and uncompress zip, or load exsisting files
+    filename = 'ADEChallengeData2016.zip'
+    DATA_URL = 'http://data.csail.mit.edu/places/ADEchallenge/'
+    maybe_download_and_extract(filename, path, DATA_URL, extract=True)
+
+    #Get training images and annotations
+    training_images_files = load_file_list(path+'ADEChallengeData2016/images/training/',
+    regx='\.jpg', printable=False)
+    training_anno_files = load_file_list(path+'ADEChallengeData2016/annotations/training/',
+    regx='\.png', printable=False)
+
+    #Get validation images and annotations
+    val_images_files = load_file_list(path+'ADEChallengeData2016/images/validation/',
+    regx='\.jpg', printable=False)
+    val_anno_files = load_file_list(path+'ADEChallengeData2016/annotations/validation/',
+    regx='\.png', printable=False)
+
+    #Randomize images
+    if(randomize):
+        random.shuffle(training_images_files)
+        random.shuffle(training_anno_files)
+        random.shuffle(val_images_files)
+        random.shuffle(val_anno_files)
+
+    #Select only subset of images
+    nr_training_images_toload = int(len(training_images_files)*(load_size/100.0))
+    training_images_files = training_images_files[0:nr_training_images_toload]
+    training_anno_files = training_anno_files[0:nr_training_images_toload]
+
+    nr_val_images_toload = int(len(val_images_files)*(load_size/100.0))
+    val_images_files = val_images_files[0:nr_val_images_toload]
+    val_anno_files = val_anno_files[0:nr_val_images_toload]
+
+    #Read and pre-process images
+    x_train = _read_and_process_images(training_images_files, (img_size[0],
+        img_size[1], 3), path = path+'ADEChallengeData2016/images/training/')
+
+    y_train = _read_and_process_images(training_anno_files, (img_size[0],
+        img_size[1], 1), path = path+'ADEChallengeData2016/annotations/training/')
+
+    x_val = _read_and_process_images(training_images_files, (img_size[0],
+        img_size[1], 3), path = path+'ADEChallengeData2016/images/training/')
+
+    y_val = _read_and_process_images(training_anno_files, (img_size[0],
+        img_size[1], 1), path = path+'ADEChallengeData2016/annotations/training/')
+
+    return x_train, y_train, x_val, y_val
 
 ## Load and save network
 def save_npz(save_list=[], name='model.npz', sess=None):
